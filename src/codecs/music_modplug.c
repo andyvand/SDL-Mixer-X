@@ -66,6 +66,10 @@ static ModPlug_Settings settings;
     if (modplug.FUNC == NULL) { Mix_SetError("Missing libmodplug.framework"); return -1; }
 #endif
 
+#ifdef __APPLE__
+    /* Need to turn off optimizations so weak framework load check works */
+    __attribute__ ((optnone))
+#endif
 static int MODPLUG_Load(void)
 {
     if (modplug.loaded == 0) {
@@ -87,6 +91,9 @@ static int MODPLUG_Load(void)
         FUNCTION_LOADER(ModPlug_GetName, const char* (*)(ModPlugFile* file))
 #ifdef MODPLUG_DYNAMIC
         modplug.ModPlug_Tell = (int (*)(ModPlugFile* file)) SDL_LoadFunction(modplug.handle, "ModPlug_Tell");
+        if (modplug.ModPlug_Tell == NULL) {
+            SDL_ClearError();   /* ModPlug_Tell is optional. */
+        }
 #elif defined(MODPLUG_HAS_TELL)
         modplug.ModPlug_Tell = ModPlug_Tell;
 #else
@@ -358,6 +365,8 @@ Mix_MusicInterface Mix_MusicInterface_MODPLUG =
     NULL,   /* CreateFromFileEx [MIXER-X]*/
     MODPLUG_SetVolume,
     MODPLUG_GetVolume,
+    NULL,   /* SetGain [MIXER-X]*/
+    NULL,   /* GetGain [MIXER-X]*/
     MODPLUG_Play,
     NULL,   /* IsPlaying */
     MODPLUG_GetAudio,

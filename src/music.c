@@ -240,7 +240,7 @@ static void _Mix_MultiMusic_ResumeAll(void)
 
 typedef struct _Eff_positionargs position_args;
 
-struct _Mix_Music {
+struct Mix_Music {
     Mix_MusicInterface *interface;
     void *context;
 
@@ -1377,12 +1377,49 @@ static int detect_ea_rsxx(SDL_RWops *in, Sint64 start, Uint8 magic_byte)
     return res;
 }
 
+static int detect_mod(SDL_RWops *in, Sint64 start)
+{
+    int res = SDL_FALSE;
+    int i;
+    Uint8 mod_magic[4];
+    const char * const mod_known_magics[] = {
+        "M.K.", "M!K!", "M&K!", "N.T.", "6CHN", "8CHN",
+        "CD61", "CD81", "TDZ1", "TDZ2", "TDZ3", "TDZ4",
+        "FA04", "FA06", "FA08", "LARD", "NSMS", "FLT4",
+        NULL
+    };
+
+    if (SDL_RWseek(in, start + 1080, RW_SEEK_SET) < 0) {
+        goto fail;
+    }
+    if (SDL_RWread(in, mod_magic, 1, 4) != 4) {
+        goto fail;
+    }
+
+    for (i = 0; mod_known_magics[i] ; ++i) {
+        if(SDL_memcmp(mod_magic, mod_known_magics[i], 4) == 0) {
+            res = SDL_TRUE;
+            break;
+        }
+    }
+
+fail:
+    SDL_RWseek(in, start, RW_SEEK_SET);
+    return res;
+}
+
 static int detect_mp3(Uint8 *magic, SDL_RWops *src, Sint64 start, Sint64 offset)
 {
     const Uint32 null = 0;
     Uint8 mp3_magic[4];
+    Uint8 mp3_read_buffer[2048];
+    const size_t mp3_read_buffer_size = 2048;
+    size_t i = 0, got;
+    SDL_bool found;
+    SDL_bool at_end = SDL_FALSE;
     Sint64 end_file_pos = 0;
     const int max_search = 10240;
+    int bytes_read = 0;
 
     SDL_memcpy(mp3_magic, magic, 4);
 
@@ -1407,14 +1444,33 @@ static int detect_mp3(Uint8 *magic, SDL_RWops *src, Sint64 start, Sint64 offset)
 
 digMoreBytes:
     /* Find the nearest 0xFF byte */
-    while ((SDL_RWread(src, mp3_magic, 1, 1) == 1) &&
-           (mp3_magic[0] != 0xFF) &&
-           (SDL_RWtell(src) < (start + offset + max_search)) &&
-           (SDL_RWtell(src) < (end_file_pos - 1)) )
-    {}
+    found = SDL_FALSE;
+    do
+    {
+        SDL_memset(mp3_read_buffer, 0, mp3_read_buffer_size);
+        got = SDL_RWread(src, mp3_read_buffer, 1, mp3_read_buffer_size);
 
-    /* Can't read last 3 bytes of the frame header */
-    if (SDL_RWread(src, mp3_magic + 1, 1, 3) != 3) {
+        at_end = got < mp3_read_buffer_size;
+
+        if (got == 0) {
+            SDL_RWseek(src, start, RW_SEEK_SET); /* Reached the end of the file */
+            return 0;
+        }
+
+        bytes_read += got;
+
+        for (i = 0; i < got; ++i) {
+            if (mp3_read_buffer[i] == 0xFF) {
+                found = SDL_TRUE;
+                bytes_read -= (Sint64)(got - i);
+                SDL_RWseek(src, -(Sint64)(got - i), RW_SEEK_CUR);
+                break;
+            }
+        }
+    } while(!found && bytes_read < max_search);
+
+    /* Can't read 4 bytes of the frame header */
+    if (SDL_RWread(src, mp3_magic, 1, 4) != 4) {
         SDL_RWseek(src, start, RW_SEEK_SET);
         return 0;
     }
@@ -1423,7 +1479,7 @@ digMoreBytes:
     SDL_RWseek(src, -3, RW_SEEK_CUR);
 
     /* Got the end of search zone, however, found nothing */
-    if (SDL_RWtell(src) >= (start + offset + max_search)) {
+    if (bytes_read > max_search) {
         SDL_RWseek(src, start, RW_SEEK_SET);
         return 0;
     }
@@ -1436,14 +1492,18 @@ digMoreBytes:
 
 readHeader:
     if (
-        ((mp3_magic[0] & 0xff) != 0xff) || ((mp3_magic[1] & 0xf0) != 0xf0) || /*  No sync bits */
-        ((mp3_magic[1] & 0xe6) != 0xe2) ||
+        ((mp3_magic[0] & 0xff) != 0xff) || ((mp3_magic[1] & 0xe6) != 0xe2) || /*  No sync bits */
         ((mp3_magic[2] & 0xf0) == 0x00) || /*  Bitrate is 0 */
         ((mp3_magic[2] & 0xf0) == 0xf0) || /*  Bitrate is 15 */
         ((mp3_magic[2] & 0x0c) == 0x0c) || /*  Frequency is 3 */
         ((mp3_magic[1] & 0x06) == 0x00)    /*  Layer is 4 */
     ) {
         /* printf("WRONG BITS\n"); */
+        if (at_end) {
+            SDL_RWseek(src, start, RW_SEEK_SET); /* Reached the end of the file */
+            return 0;
+        }
+
         goto digMoreBytes;
     }
 
@@ -1731,6 +1791,10 @@ Mix_MusicType detect_music_type(SDL_RWops *src)
         }
     }
 
+    if (detect_mod(src, start)) {
+        return MUS_MOD;
+    }
+
     /* Detect MP3 format by frame header [needs scanning of bigger part of the file] */
     if (detect_mp3(submagic, src, start, id3len)) {
         return MUS_MP3;
@@ -1887,7 +1951,7 @@ Mix_Music * MIXCALLCC Mix_LoadMUS(const char *file)
         }
     }
 
-    src = SDL_RWFromFile(file, "rb");
+    src = _Mix_RWFromFile(file, "rb");
     if (src == NULL) {
         Mix_SetError("Couldn't open '%s'", file);
         SDL_free(music_file);
@@ -1901,7 +1965,6 @@ Mix_Music * MIXCALLCC Mix_LoadMUS(const char *file)
     if (ext) {
         ++ext; /* skip the dot in the extension */
         if (SDL_strcasecmp(ext, "AMS") == 0 ||
-            SDL_strcasecmp(ext, "MOD") == 0 ||
             SDL_strcasecmp(ext, "MOL") == 0 ||
             SDL_strcasecmp(ext, "NST") == 0 ||
             SDL_strcasecmp(ext, "STM") == 0 ||
@@ -2983,6 +3046,37 @@ int MIXCALLCC Mix_GetVolumeMusicGeneral(void)
     return music_general_volume;
 }
 
+int MIXCALLCC Mix_SetMusicGain(Mix_Music *music, float gain)
+{
+    int ret = -1;
+
+    if (gain < 0.0f) {
+        gain = 0.0f;
+    }
+
+    Mix_LockAudio();
+    if (music && music->interface && music->interface->SetGain) {
+        music->interface->SetGain(music->context, gain);
+        ret = 0;
+    }
+    Mix_UnlockAudio();
+
+    return ret;
+}
+
+float MIXCALLCC Mix_GetMusicGain(Mix_Music *music)
+{
+    float ret = -1.0f;
+
+    Mix_LockAudio();
+    if (music && music->interface && music->interface->GetGain) {
+        ret = music->interface->GetGain(music->context);
+    }
+    Mix_UnlockAudio();
+
+    return ret;
+}
+
 /* Halt playing of music */
 static void music_internal_halt(Mix_Music *music)
 {
@@ -3435,7 +3529,7 @@ const char* MIXCALLCC Mix_GetSoundFonts(void)
         unsigned i;
 
         for (i = 0; i < SDL_arraysize(s_soundfont_paths); ++i) {
-            SDL_RWops *rwops = SDL_RWFromFile(s_soundfont_paths[i], "rb");
+            SDL_RWops *rwops = _Mix_RWFromFile(s_soundfont_paths[i], "rb");
             if (rwops) {
                 SDL_RWclose(rwops);
                 return s_soundfont_paths[i];

@@ -84,6 +84,10 @@ static xmp_loader libxmp;
     libxmp.FUNC = FUNC;
 #endif
 
+#ifdef __APPLE__
+    /* Need to turn off optimizations so weak framework load check works */
+    __attribute__ ((optnone))
+#endif
 static int XMP_Load(void)
 {
     if (libxmp.loaded == 0) {
@@ -483,6 +487,8 @@ Mix_MusicInterface Mix_MusicInterface_XMP =
     NULL,   /* CreateFromFileEx [MIXER-X]*/
     XMP_SetVolume,
     XMP_GetVolume,
+    NULL,   /* SetGain [MIXER-X]*/
+    NULL,   /* GetGain [MIXER-X]*/
     XMP_Play,
     NULL,   /* IsPlaying */
     XMP_GetAudio,

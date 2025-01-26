@@ -35,6 +35,7 @@
 #   include "stream_custom.h"
 #endif
 
+extern Mix_RWFromFile_cb _Mix_RWFromFile;
 
 typedef struct {
     int loaded;
@@ -43,7 +44,7 @@ typedef struct {
 #if (FLUIDSYNTH_VERSION_MAJOR >= 2)
     void (*delete_fluid_player)(fluid_player_t*);
     void (*delete_fluid_synth)(fluid_synth_t*);
-    int (*fluid_player_seek)(fluid_player_t*, int);
+    int (*fluid_player_seek)(fluid_player_t *, int);
 #else
     int (*delete_fluid_player)(fluid_player_t*);
     int (*delete_fluid_synth)(fluid_synth_t*);
@@ -78,6 +79,10 @@ static fluidsynth_loader fluidsynth;
     fluidsynth.FUNC = FUNC;
 #endif
 
+#ifdef __APPLE__
+    /* Need to turn off optimizations so weak framework load check works */
+    __attribute__ ((optnone))
+#endif
 static int FLUIDSYNTH_Load()
 {
     if (fluidsynth.loaded == 0) {
@@ -90,7 +95,7 @@ static int FLUIDSYNTH_Load()
 #if (FLUIDSYNTH_VERSION_MAJOR >= 2)
         FUNCTION_LOADER(delete_fluid_player, void (*)(fluid_player_t*))
         FUNCTION_LOADER(delete_fluid_synth, void (*)(fluid_synth_t*))
-        FUNCTION_LOADER(fluid_player_seek, int (*)(fluid_player_t*, int))
+        FUNCTION_LOADER(fluid_player_seek, int (*)(fluid_player_t *, int))
 #else
         FUNCTION_LOADER(delete_fluid_player, int (*)(fluid_player_t*))
         FUNCTION_LOADER(delete_fluid_synth, int (*)(fluid_synth_t*))
@@ -141,6 +146,7 @@ typedef struct {
     void *buffer;
     int buffer_size;
     int volume;
+    float gain;
     SDL_bool is_paused;
 } FLUIDSYNTH_Music;
 
@@ -148,7 +154,7 @@ static void FLUIDSYNTH_Delete(void *context);
 
 static int SDLCALL fluidsynth_check_soundfont(const char *path, void *data)
 {
-    SDL_RWops *rw = SDL_RWFromFile(path, "rb");
+    SDL_RWops *rw = _Mix_RWFromFile(path, "rb");
 
     (void)data;
     if (rw) {
@@ -192,6 +198,7 @@ static FLUIDSYNTH_Music *FLUIDSYNTH_LoadMusic(void *data)
         return NULL;
     }
 
+    music->gain = 1.0f;
     music->volume = MIX_MAX_VOLUME;
     music->buffer_size = music_spec.samples * sizeof(Sint16) * channels;
     music->synth_write = fluidsynth.fluid_synth_write_s16;
@@ -268,13 +275,27 @@ static void FLUIDSYNTH_SetVolume(void *context, int volume)
     FLUIDSYNTH_Music *music = (FLUIDSYNTH_Music *)context;
     /* FluidSynth's default gain is 0.2. Make 1.0 the maximum gain value to avoid sound overload. */
     music->volume = volume;
-    fluidsynth.fluid_synth_set_gain(music->synth, volume * 1.0f / MIX_MAX_VOLUME);
+    fluidsynth.fluid_synth_set_gain(music->synth, (volume * music->gain) / MIX_MAX_VOLUME);
 }
 
 static int FLUIDSYNTH_GetVolume(void *context)
 {
     FLUIDSYNTH_Music *music = (FLUIDSYNTH_Music *)context;
     return music->volume;
+}
+
+static void FLUIDSYNTH_SetGain(void *context, float gain)
+{
+    FLUIDSYNTH_Music *music = (FLUIDSYNTH_Music *)context;
+    /* FluidSynth's default gain is 0.2. Make 1.0 the maximum gain value to avoid sound overload. */
+    music->gain = gain;
+    fluidsynth.fluid_synth_set_gain(music->synth, (music->volume * music->gain) / MIX_MAX_VOLUME);
+}
+
+static float FLUIDSYNTH_GetGain(void *context)
+{
+    FLUIDSYNTH_Music *music = (FLUIDSYNTH_Music *)context;
+    return music->gain;
 }
 
 static int FLUIDSYNTH_Play(void *context, int play_count)
@@ -291,7 +312,7 @@ static int FLUIDSYNTH_Play(void *context, int play_count)
 
 static void FLUIDSYNTH_Resume(void *context)
 {
-    FLUIDSYNTH_Music *music = (FLUIDSYNTH_Music*)context;
+    FLUIDSYNTH_Music *music = (FLUIDSYNTH_Music *)context;
     fluidsynth.fluid_player_play(music->player);
     music->is_paused = SDL_FALSE;
 }
@@ -315,8 +336,7 @@ static int FLUIDSYNTH_GetSome(void *context, void *data, int bytes, SDL_bool *do
     }
 
     if (music->synth_write(music->synth, music_spec.samples, music->buffer, 0, 2, music->buffer, 1, 2) != FLUID_OK) {
-        Mix_SetError("Error generating FluidSynth audio");
-        return -1;
+        return Mix_SetError("Error generating FluidSynth audio");
     }
     if (SDL_AudioStreamPut(music->stream, music->buffer, music->buffer_size) < 0) {
         return -1;
@@ -340,7 +360,7 @@ static void FLUIDSYNTH_Stop(void *context)
 
 static void FLUIDSYNTH_Pause(void *context)
 {
-    FLUIDSYNTH_Music *music = (FLUIDSYNTH_Music*)context;
+    FLUIDSYNTH_Music *music = (FLUIDSYNTH_Music *)context;
     fluidsynth.fluid_player_stop(music->player);
     music->is_paused = SDL_TRUE;
 }
@@ -383,6 +403,8 @@ Mix_MusicInterface Mix_MusicInterface_FLUIDSYNTH =
     NULL,   /* CreateFromFileEx [MIXER-X]*/
     FLUIDSYNTH_SetVolume,
     FLUIDSYNTH_GetVolume,
+    FLUIDSYNTH_SetGain,   /* SetGain [MIXER-X]*/
+    FLUIDSYNTH_GetGain,   /* GetGain [MIXER-X]*/
     FLUIDSYNTH_Play,
     FLUIDSYNTH_IsPlaying,
     FLUIDSYNTH_GetAudio,
